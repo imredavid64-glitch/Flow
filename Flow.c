@@ -9,10 +9,11 @@
 #include <stdint.h>
 
 #define MAX_LINE_LENGTH 256
-#define MAX_VARS 1000
-#define MAX_NAME_LENGTH 50
-#define MAX_PROGRAM_LINES 5000
-#define MAX_LIST_SIZE 500
+#define MAX_VARS 2000
+#define MAX_NAME_LENGTH 64
+#define MAX_PROGRAM_LINES 10000
+#define MAX_LIST_SIZE 1000
+#define MAX_FUNCTIONS 100
 
 // ANSI Color Codes
 #define RESET "\033[0m"
@@ -24,7 +25,7 @@
 #define CYN   "\033[36m"
 #define BOLD  "\033[1m"
 
-typedef enum { TYPE_NUMBER, TYPE_TEXT, TYPE_LIST, TYPE_POINTER } VarType;
+typedef enum { TYPE_NUMBER, TYPE_TEXT, TYPE_LIST, TYPE_POINTER, TYPE_VOID } VarType;
 
 typedef struct {
     char name[MAX_NAME_LENGTH];
@@ -36,12 +37,19 @@ typedef struct {
     uintptr_t memory_address; 
 } Variable;
 
+typedef struct {
+    char name[MAX_NAME_LENGTH];
+    int start_line;
+} Function;
+
 Variable symbol_table[MAX_VARS];
+Function function_table[MAX_FUNCTIONS];
 int var_count = 0;
+int func_count = 0;
 char program[MAX_PROGRAM_LINES][MAX_LINE_LENGTH];
 int total_lines = 0;
 
-// Memory Management
+// Utility Helpers
 Variable* find_variable(const char* name) {
     for (int i = 0; i < var_count; i++) {
         if (strcasecmp(symbol_table[i].name, name) == 0) return &symbol_table[i];
@@ -82,17 +90,12 @@ bool is_numeric(const char* str) {
     return *endptr == '\0';
 }
 
-// Library Implementations
 void load_library(const char* lib_name) {
-    printf(MAG BOLD ">> Library [%s] loaded successfully." RESET "\n", lib_name);
-    if (strcasecmp(lib_name, "Math_Plus") == 0) {
-        printf("   (Adding support for: Sine, Cosine, Square Root, Log)\n");
-    } else if (strcasecmp(lib_name, "File_System") == 0) {
-        printf("   (Adding support for: Write to Disk, Read from Disk)\n");
-    } else if (strcasecmp(lib_name, "Graphics_Text") == 0) {
-        printf("   (Adding support for: ASCII Art Rendering, Borders)\n");
-    }
+    printf(MAG BOLD ">> Library [%s] integrated into kernel." RESET "\n", lib_name);
 }
+
+// Global process_line declaration for recursion
+void process_line(int* current_line);
 
 void process_line(int* current_line) {
     char line[MAX_LINE_LENGTH];
@@ -100,44 +103,65 @@ void process_line(int* current_line) {
     char* trim = line;
     while(isspace(*trim)) trim++;
     
-    if (*trim == '\0' || strncasecmp(trim, "Note:", 5) == 0) return;
+    if (*trim == '\0' || strncasecmp(trim, "Note:", 5) == 0 || strncmp(trim, "//", 2) == 0) return;
 
-    // --- FILE I/O ---
-    if (strncasecmp(trim, "Save ", 5) == 0) {
-        char name[MAX_NAME_LENGTH], filename[MAX_NAME_LENGTH];
-        if (sscanf(trim, "Save %s to %s", name, filename) == 2) {
-            Variable* v = find_variable(name);
-            FILE *f = fopen(filename, "w");
-            if (f && v) {
-                if (v->type == TYPE_NUMBER) fprintf(f, "%g", v->number_value);
-                else fprintf(f, "%s", v->text_value);
-                fclose(f);
-                printf(GRN ">> Data saved to %s" RESET "\n", filename);
+    // --- FUNCTION DEFINITION (Skip during linear execution) ---
+    if (strncasecmp(trim, "Function ", 9) == 0) {
+        char func_name[MAX_NAME_LENGTH];
+        sscanf(trim, "Function %[^:]", func_name);
+        bool found = false;
+        for(int f=0; f<func_count; f++) if(strcmp(function_table[f].name, func_name) == 0) found = true;
+        if(!found) {
+            strcpy(function_table[func_count].name, func_name);
+            function_table[func_count++].start_line = *current_line;
+        }
+        while (*current_line < total_lines - 1 && strncasecmp(program[*current_line], "End Function", 12) != 0) {
+            (*current_line)++;
+        }
+        return;
+    }
+
+    // --- CALL FUNCTION ---
+    if (strncasecmp(trim, "Call ", 5) == 0) {
+        char func_name[MAX_NAME_LENGTH];
+        sscanf(trim, "Call %s", func_name);
+        for (int f = 0; f < func_count; f++) {
+            if (strcasecmp(function_table[f].name, func_name) == 0) {
+                int call_ptr = function_table[f].start_line + 1;
+                while (call_ptr < total_lines && strncasecmp(program[call_ptr], "End Function", 12) != 0) {
+                    process_line(&call_ptr);
+                    call_ptr++;
+                }
+                return;
             }
         }
+        printf(RED "!! Function %s not found." RESET "\n", func_name);
     }
 
-    // --- HARDWARE & MEMORY ---
-    else if (strncasecmp(trim, "Look at memory of ", 18) == 0) {
-        char name[MAX_NAME_LENGTH];
-        sscanf(trim, "Look at memory of %s", name);
-        Variable* v = find_variable(name);
-        if (v) printf("> Memory Address of %s: %p\n", name, (void*)v);
-    }
-    else if (strncasecmp(trim, "Point ", 6) == 0) {
-        char name[MAX_NAME_LENGTH]; uintptr_t addr;
-        if (sscanf(trim, "Point %s to address %lx", name, &addr) == 2) {
-            set_or_create_var(name, TYPE_POINTER, 0, "");
+    // --- SYMBOLIC ASSIGNMENT & MATH (X = 10, X += 5, X = X * 2) ---
+    if (strchr(trim, '=') && !strstr(trim, "==") && !strstr(trim, "!=") && !strstr(trim, "<=") && !strstr(trim, ">=")) {
+        char name[MAX_NAME_LENGTH], val_str[MAX_LINE_LENGTH];
+        // Handle +=, -=, *=, /=
+        if (strstr(trim, "+=")) {
+            sscanf(trim, "%s += %lf", name, &val_str[0]);
             Variable* v = find_variable(name);
-            v->memory_address = addr;
+            if (v) v->number_value += atof(val_str);
+            return;
+        }
+        if (sscanf(trim, "%s = %[^\n]", name, val_str) == 2) {
+            sanitize(val_str);
+            if (is_numeric(val_str)) set_or_create_var(name, TYPE_NUMBER, atof(val_str), "");
+            else {
+                Variable* v_src = find_variable(val_str);
+                if (v_src) set_or_create_var(name, v_src->type, v_src->number_value, v_src->text_value);
+                else set_or_create_var(name, TYPE_TEXT, 0, val_str);
+            }
+            return;
         }
     }
-    else if (strcasecmp(trim, "Beep") == 0) {
-        printf("\a> *System Beep*\n");
-    }
 
-    // --- LOOPS (While/Repeat) ---
-    else if (strncasecmp(trim, "Repeat ", 7) == 0) {
+    // --- REPEAT LOOP ---
+    if (strncasecmp(trim, "Repeat ", 7) == 0) {
         int times, start_line = *current_line;
         if (sscanf(trim, "Repeat %d times:", &times) == 1) {
             for (int t = 0; t < times; t++) {
@@ -147,93 +171,98 @@ void process_line(int* current_line) {
                     loop_ptr++;
                 }
             }
-            while (*current_line < total_lines && strncasecmp(program[*current_line], "End Repeat", 10) != 0) {
-                (*current_line)++;
-            }
+            while (*current_line < total_lines && strncasecmp(program[*current_line], "End Repeat", 10) != 0) (*current_line)++;
         }
+        return;
     }
 
-    // --- LIBRARIES ---
-    else if (strncasecmp(trim, "Include ", 8) == 0) {
-        char lib[MAX_NAME_LENGTH];
-        sscanf(trim, "Include %s", lib);
-        load_library(lib);
-    }
-
-    // --- CORE COMMANDS ---
-    else if (strncasecmp(trim, "Create a", 8) == 0 || strncasecmp(trim, "Set ", 4) == 0) {
-        char name[MAX_NAME_LENGTH], val_str[MAX_LINE_LENGTH];
-        if (sscanf(trim, "Create a %*s called %s set to %[^\n]", name, val_str) >= 2 ||
-            sscanf(trim, "Set %s to %[^\n]", name, val_str) >= 2) {
-            sanitize(val_str);
-            if (is_numeric(val_str)) set_or_create_var(name, TYPE_NUMBER, atof(val_str), "");
-            else set_or_create_var(name, TYPE_TEXT, 0, val_str);
-        }
-    }
-
-    // --- ADVANCED MATH ---
-    else if (strncasecmp(trim, "Calculate sine of ", 18) == 0) {
-        char name[MAX_NAME_LENGTH];
-        sscanf(trim, "Calculate sine of %s", name);
-        Variable* v = find_variable(name);
-        if (v && v->type == TYPE_NUMBER) v->number_value = sin(v->number_value);
-    }
-    else if (strncasecmp(trim, "Add ", 4) == 0 || strncasecmp(trim, "Subtract ", 9) == 0 || 
-             strncasecmp(trim, "Multiply ", 9) == 0 || strncasecmp(trim, "Divide ", 7) == 0) {
-        char op[20], name[MAX_NAME_LENGTH]; double val;
-        sscanf(trim, "%s %lf %*s %s", op, &val, name);
-        Variable* v = find_variable(name);
-        if (v && v->type == TYPE_NUMBER) {
-            if (strcasecmp(op, "Add") == 0) v->number_value += val;
-            else if (strcasecmp(op, "Subtract") == 0) v->number_value -= val;
-            else if (strcasecmp(op, "Multiply") == 0) v->number_value *= val;
-            else if (strcasecmp(op, "Divide") == 0 && val != 0) v->number_value /= val;
-        }
-    }
-
-    // --- CONDITIONALS ---
-    else if (strncasecmp(trim, "If ", 3) == 0) {
-        char name[MAX_NAME_LENGTH]; double threshold; bool condition = false;
-        if (sscanf(trim, "If %s is %lf", name, &threshold) >= 2) {
-            Variable* v = find_variable(name);
-            if (v && v->type == TYPE_NUMBER) {
-                if (strstr(trim, "more than")) condition = (v->number_value > threshold);
-                else if (strstr(trim, "less than")) condition = (v->number_value < threshold);
-                else if (strstr(trim, "exactly")) condition = (v->number_value == threshold);
-            }
+    // --- CONDITIONALS (Hybrid) ---
+    if (strncasecmp(trim, "If ", 3) == 0) {
+        char left[MAX_NAME_LENGTH], op[10], right[MAX_NAME_LENGTH];
+        bool condition = false;
+        if (sscanf(trim, "If %s %s %s", left, op, right) >= 3) {
+            Variable* v_l = find_variable(left);
+            Variable* v_r = find_variable(right);
+            double l_val = v_l ? v_l->number_value : (is_numeric(left) ? atof(left) : 0);
+            double r_val = v_r ? v_r->number_value : (is_numeric(right) ? atof(right) : 0);
+            
+            if (strcmp(op, ">") == 0 || strstr(trim, "more than")) condition = (l_val > r_val);
+            else if (strcmp(op, "<") == 0 || strstr(trim, "less than")) condition = (l_val < r_val);
+            else if (strcmp(op, ">=") == 0 || strstr(trim, "at least")) condition = (l_val >= r_val);
+            else if (strcmp(op, "<=") == 0 || strstr(trim, "at most")) condition = (l_val <= r_val);
+            else if (strcmp(op, "==") == 0 || strstr(trim, "exactly")) condition = (l_val == r_val);
+            else if (strcmp(op, "!=") == 0 || strstr(trim, "not")) condition = (l_val != r_val);
         }
         if (!condition) {
             int depth = 1;
             while (*current_line < total_lines - 1 && depth > 0) {
                 (*current_line)++;
-                if (strstr(program[*current_line], "If ")) depth++;
+                if (strncasecmp(program[*current_line], "If ", 3) == 0) depth++;
                 if (strstr(program[*current_line], "Otherwise:") || strstr(program[*current_line], "End If")) depth--;
             }
         }
+        return;
     }
 
-    // --- SYSTEM & OUTPUT ---
+    // --- HARDWARE / SYSTEM ---
+    if (strncasecmp(trim, "Look at memory of ", 18) == 0) {
+        char name[MAX_NAME_LENGTH]; sscanf(trim, "Look at memory of %s", name);
+        Variable* v = find_variable(name);
+        if (v) printf(CYN "> Memory of %s: %p" RESET "\n", name, (void*)v);
+    } 
+    else if (strncasecmp(trim, "Randomize ", 10) == 0) {
+        char name[MAX_NAME_LENGTH]; double min, max;
+        if (sscanf(trim, "Randomize %s between %lf and %lf", name, &min, &max) == 3) {
+            double r = min + (rand() / (RAND_MAX / (max - min)));
+            set_or_create_var(name, TYPE_NUMBER, r, "");
+        }
+    }
+    else if (strncasecmp(trim, "Color ", 6) == 0) {
+        if (strstr(trim, "Red")) printf(RED);
+        else if (strstr(trim, "Green")) printf(GRN);
+        else if (strstr(trim, "Blue")) printf(BLU);
+        else if (strstr(trim, "Yellow")) printf(YEL);
+        else printf(RESET);
+    }
+    else if (strcasecmp(trim, "Beep") == 0) printf("\a");
     else if (strcasecmp(trim, "Show Time") == 0) {
-        time_t t = time(NULL); printf("> %s", ctime(&t));
+        time_t t = time(NULL); printf(YEL "> %s" RESET, ctime(&t));
     }
     else if (strncasecmp(trim, "Show ", 5) == 0) {
         char* content = trim + 5; while(isspace(*content)) content++;
         Variable* v = find_variable(content);
         if (v) {
-            if (v->type == TYPE_NUMBER) printf("> %g\n", v->number_value);
-            else if (v->type == TYPE_TEXT) printf("> %s\n", v->text_value);
-            else if (v->type == TYPE_POINTER) printf("> 0x%lx\n", v->memory_address);
+            if (v->type == TYPE_NUMBER) printf("%g\n", v->number_value);
+            else if (v->type == TYPE_TEXT) printf("%s\n", v->text_value);
+            else if (v->type == TYPE_POINTER) printf("0x%lx\n", v->memory_address);
         } else {
-            sanitize(content); printf("> %s\n", content);
+            sanitize(content); printf("%s\n", content);
         }
+    }
+    else if (strncasecmp(trim, "Save ", 5) == 0) {
+        char name[MAX_NAME_LENGTH], filename[MAX_NAME_LENGTH];
+        if (sscanf(trim, "Save %s to %s", name, filename) == 2) {
+            Variable* v = find_variable(name);
+            FILE *f = fopen(filename, "w");
+            if (f && v) {
+                if (v->type == TYPE_NUMBER) fprintf(f, "%g", v->number_value);
+                else fprintf(f, "%s", v->text_value);
+                fclose(f);
+                printf(GRN ">> %s written to disk." RESET "\n", filename);
+            }
+        }
+    }
+    else if (strncasecmp(trim, "Include ", 8) == 0) {
+        char lib[MAX_NAME_LENGTH]; sscanf(trim, "Include %s", lib);
+        load_library(lib);
     }
 }
 
 int main() {
     srand(time(NULL));
-    printf(CYN BOLD "=== FLOW v6.0 (Modular Super-Kernel) ===" RESET "\n");
-    printf("Capabilities: Libraries, File I/O, Advanced Loops, Kernel Memory\n");
-    printf("Type 'RUN' to execute.\n\n");
+    printf(CYN BOLD "=== FLOW v8.0 HYBRID KERNEL ===" RESET "\n");
+    printf("New: Functions, Symbolic Math, Randomization, Terminal Colors\n");
+    printf("Ready for sequence. End code with 'RUN'.\n\n");
 
     while (total_lines < MAX_PROGRAM_LINES) {
         printf(BLU "%d:" RESET " ", total_lines + 1);
@@ -242,10 +271,10 @@ int main() {
         total_lines++;
     }
 
-    printf("\n" GRN "--- BOOTING INTERPRETER ---" RESET "\n");
+    printf("\n" GRN "--- EXECUTION START ---" RESET "\n");
     for (int i = 0; i < total_lines; i++) {
         process_line(&i);
     }
-    printf(GRN "--- SHUTDOWN ---" RESET "\n");
+    printf(RESET GRN "--- EXECUTION COMPLETE ---" RESET "\n");
     return 0;
 }
